@@ -5,33 +5,17 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-env:
-  PYTHONUTF8: 1
-  FLET_CLI_NO_RICH_OUTPUT: 1
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-
-      - name: Cache Flet/Flutter/Android toolchains
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/flutter
-            ~/Android
-            ~/java
-            ~/.flet
-          key: flet-android-${{ runner.os }}-v1
-          restore-keys: |
-            flet-android-${{ runner.os }}-
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
@@ -39,11 +23,11 @@ jobs:
           pip install -r requirements.txt
 
       - name: Build APK using Flet
-        run: flet build apk --yes --verbose
+        run: |
+          flet build apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OilField-App-APK
-          path: build/apk/*.apk
-          if-no-files-found: error
+          name: oilfield-apk-file
+          path: build/apk/app-release.apk
