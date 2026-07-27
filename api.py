@@ -19,7 +19,7 @@ app = FastAPI(title="OilField Automation API", version="1.0")
 # ---------------------------------------------------------------------------
 # إعداد نظام الحماية بواسطة مفتاح API السري
 # ---------------------------------------------------------------------------
-API_KEY = "Suleiman_Secure_Key_2026"  # يمكن تغيره إلى أي نص سري خاص بك
+API_KEY = "Suleiman_Secure_Key_2026"  # مفتاح الأمان السري
 api_key_header = APIKeyHeader(name="X-API-Key")
 
 def verify_api_key(header_key: str = Depends(api_key_header)):
