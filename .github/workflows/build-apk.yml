@@ -1,45 +1,117 @@
-name: Build Flet Android APK
+name: Build Android APK (OilField-App / Flet)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
+  pull_request:
   workflow_dispatch:
 
 env:
-  PYTHONUTF8: 1
-  FLET_CLI_NO_RICH_OUTPUT: 1
+  PYTHON_VERSION: "3.12"
+  JAVA_VERSION: "17"
+  # --- متغيرات حاسمة لمنع التوقف الصامت في بيئة CI غير التفاعلية ---
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  FLET_CLI_NO_RICH_OUTPUT: "1"
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build-apk:
+    name: Build APK
+    runs-on: ubuntu-24.04          # نسخة مثبّتة صراحة بدل ubuntu-latest لتفادي تغييرات مفاجئة في صورة الرَنر
+    timeout-minutes: 45
+
     steps:
-      - name: Checkout code
+      # ------------------------------------------------------------------
+      # 1) تحرير مساحة قرص إضافية — بناء Android عبر Flutter/Gradle ثقيل
+      #    وقد يفشل لاحقًا بمشاكل "No space left on device" على الرنرات المشغولة.
+      # ------------------------------------------------------------------
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk-bundle \
+                      /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Java JDK 17
+      # ------------------------------------------------------------------
+      # 2) Java 17 صراحة — Gradle يحتاجه، ولا نعتمد على ما هو مثبت افتراضيًا
+      #    في صورة الرَنر لأنه قد يتغير بدون إشعار مسبق.
+      # ------------------------------------------------------------------
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: "temurin"
+          java-version: ${{ env.JAVA_VERSION }}
 
-      - name: Setup Python
+      # ------------------------------------------------------------------
+      # 3) بايثون — نستخدم cache المدمج في setup-python (cache: pip) بدل
+      #    actions/cache المباشر، لأنه أقل عرضة لخلل الـ 404 المذكور.
+      # ------------------------------------------------------------------
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: requirements.txt
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          # تأكيد وجود flet CLI حتى لو لم يكن مثبتًا بشكل صريح فيه إصدار داخل requirements.txt
+          python -c "import flet" || pip install "flet[all]"
 
-      - name: Build APK using Flet
-        run: flet build apk --yes --verbose
+      - name: Show toolchain versions (diagnostics)
+        run: |
+          echo "== Java =="
+          java -version
+          echo "== Python =="
+          python --version
+          echo "== Flet =="
+          flet --version
 
-      - name: Upload APK Artifact
+      # ------------------------------------------------------------------
+      # 4) البناء الفعلي — --yes يمنع أي طلب موافقة تفاعلي (سبب تعليق
+      #    المحاولة الثانية في حالة Queued)، و -v يمنحنا سجلات كافية
+      #    عند أي فشل مستقبلي غير متوقع.
+      # ------------------------------------------------------------------
+      - name: Build APK with Flet
+        run: |
+          flet build apk --yes --verbose
+        env:
+          FLET_CLI_NO_RICH_OUTPUT: "1"
+          PYTHONUTF8: "1"
+
+      # ------------------------------------------------------------------
+      # 5) تحديد موقع ملف الـ APK فعليًا بدل افتراض اسم/مسار ثابت،
+      #    لأن Flet لا يضمن دائمًا app-release.apk في نفس المكان.
+      # ------------------------------------------------------------------
+      - name: Locate and collect APK(s)
+        run: |
+          set -e
+          mkdir -p artifact-output
+          mapfile -t APKS < <(find build -type f -name "*.apk" 2>/dev/null)
+
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "::error::لم يتم العثور على أي ملف APK ضمن مجلد build/."
+            echo "محتوى مجلد build (لأغراض التشخيص):"
+            find build -maxdepth 4 2>/dev/null || echo "مجلد build غير موجود إطلاقًا"
+            exit 1
+          fi
+
+          echo "تم العثور على ${#APKS[@]} ملف/ملفات APK:"
+          printf '%s\n' "${APKS[@]}"
+
+          for f in "${APKS[@]}"; do
+            cp "$f" artifact-output/
+          done
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OilField-App-APK
-          path: |
-            build/apk/*.apk
-            build/sapk/*.apk
+          name: oilfield-app-apk
+          path: artifact-output/*.apk
           if-no-files-found: error
+          retention-days: 14
