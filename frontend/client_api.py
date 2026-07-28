@@ -1,7 +1,7 @@
 import requests
 
 # عدّل هذا الرابط إلى رابط تطبيقك الفعلي على Render بعد النشر
-BASE_URL = "https://YOUR-RENDER-APP.onrender.com"
+BASE_URL = "https://oilfield-app.onrender.com"
 
 
 def create_trip(plate_number: str, driver_name: str, well_name: str, quantity_bbl: float) -> dict:
