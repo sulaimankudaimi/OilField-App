@@ -1,0 +1,68 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/build-apk.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ------------------------------------------------------------------
+      # لا حاجة لأي نسخ انتقائي (whitelist copying) بعد الآن:
+      # Flet يبني مباشرة من مجلد frontend الذي لا يحتوي إطلاقاً
+      # على fastapi أو أي كود خادم، فالعزل أصبح على مستوى نظام الملفات.
+      # ------------------------------------------------------------------
+      - name: Install Flet CLI
+        run: pip install flet
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pip install -r requirements.txt
+
+      - name: Build APK with Flet
+        working-directory: frontend
+        run: flet build apk --yes --verbose
+        env:
+          FLET_CLI_NO_RICH_OUTPUT: "1"
+          PYTHONUTF8: "1"
+
+      # ------------------------------------------------------------------
+      # تحديد موقع ملف الـ APK فعلياً — Flet لا يضمن دائماً نفس المسار
+      # ------------------------------------------------------------------
+      - name: Locate and collect APK(s)
+        run: |
+          set -e
+          mkdir -p artifact-output
+          mapfile -t APKS < <(find frontend -type f -name "*.apk" 2>/dev/null)
+
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "::error::لم يتم العثور على أي ملف APK."
+            echo "محتوى مجلد البناء (لأغراض التشخيص):"
+            find frontend/build -maxdepth 5 2>/dev/null || echo "مجلد build غير موجود"
+            exit 1
+          fi
+
+          echo "تم العثور على ${#APKS[@]} ملف/ملفات APK:"
+          printf '%s\n' "${APKS[@]}"
+          for f in "${APKS[@]}"; do cp "$f" artifact-output/; done
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oilfield-app-apk
+          path: artifact-output/*.apk
+          if-no-files-found: error
+          retention-days: 14
