@@ -3,27 +3,26 @@ name: Build Android APK (OilField-App / Flet)
 on:
   push:
     branches: [ main, master ]
-  pull_request:
   workflow_dispatch:
 
 env:
   PYTHON_VERSION: "3.12"
   JAVA_VERSION: "17"
-  # --- متغيرات حاسمة لمنع التوقف الصامت في بيئة CI غير التفاعلية ---
   PYTHONUTF8: "1"
   PYTHONIOENCODING: "utf-8"
   FLET_CLI_NO_RICH_OUTPUT: "1"
+  # عدّل هذا الاسم ليطابق ملف واجهة Flet الفعلي (الذي يحتوي ft.app(...))
+  FLET_ENTRY_FILE: "main.py"
 
 jobs:
   build-apk:
     name: Build APK
-    runs-on: ubuntu-24.04          # نسخة مثبّتة صراحة بدل ubuntu-latest لتفادي تغييرات مفاجئة في صورة الرَنر
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
       # ------------------------------------------------------------------
-      # 1) تحرير مساحة قرص إضافية — بناء Android عبر Flutter/Gradle ثقيل
-      #    وقد يفشل لاحقًا بمشاكل "No space left on device" على الرنرات المشغولة.
+      # 1) تحرير مساحة قرص — بناء Android عبر Flutter/Gradle ثقيل جداً
       # ------------------------------------------------------------------
       - name: Free disk space
         run: |
@@ -35,78 +34,103 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------------
-      # 2) Java 17 صراحة — Gradle يحتاجه، ولا نعتمد على ما هو مثبت افتراضيًا
-      #    في صورة الرَنر لأنه قد يتغير بدون إشعار مسبق.
-      # ------------------------------------------------------------------
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
           distribution: "temurin"
           java-version: ${{ env.JAVA_VERSION }}
 
-      # ------------------------------------------------------------------
-      # 3) بايثون — نستخدم cache المدمج في setup-python (cache: pip) بدل
-      #    actions/cache المباشر، لأنه أقل عرضة لخلل الـ 404 المذكور.
-      # ------------------------------------------------------------------
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          # نعتمد على التخزين المؤقت المدمج في setup-python (وليس actions/cache
+          # المباشر) لتفادي أخطاء الـ 404 / Deprecation التي ظهرت سابقاً
           cache: "pip"
-          cache-dependency-path: requirements.txt
 
-      - name: Install Python dependencies
+      # ------------------------------------------------------------------
+      # 2) تثبيت Flet CLI فقط على المضيف — هذه الخطوة لا علاقة لها إطلاقاً
+      #    باعتماديات التطبيق التي تُحزَم داخل الـ APK لاحقاً
+      # ------------------------------------------------------------------
+      - name: Install Flet CLI (host tool only)
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          # تأكيد وجود flet CLI حتى لو لم يكن مثبتًا بشكل صريح فيه إصدار داخل requirements.txt
-          python -c "import flet" || pip install "flet[all]"
-
-      - name: Show toolchain versions (diagnostics)
-        run: |
-          echo "== Java =="
-          java -version
-          echo "== Python =="
-          python --version
-          echo "== Flet =="
-          flet --version
+          pip install "flet[all]"
+          echo "== Java ==" && java -version
+          echo "== Python ==" && python --version
+          echo "== Flet ==" && flet --version
 
       # ------------------------------------------------------------------
-      # 4) البناء الفعلي — --yes يمنع أي طلب موافقة تفاعلي (سبب تعليق
-      #    المحاولة الثانية في حالة Queued)، و -v يمنحنا سجلات كافية
-      #    عند أي فشل مستقبلي غير متوقع.
+      # 3) السبب الجذري للفشل السابق: وجود requirements.txt في جذر المشروع
+      #    (المخصص لخادم FastAPI/Render: fastapi, uvicorn, psycopg2-binary,
+      #    streamlit, sqlalchemy...) يجعل flet build يحاول تحزيم كل هذه
+      #    الحزم الثقيلة/غير المتوافقة مع أندرويد داخل التطبيق -> فشل حتمي.
+      #    الحل: بيئة بناء معزولة (staging) لا تحتوي إلا على ما يحتاجه
+      #    تطبيق الجوال فعلياً، عبر pyproject.toml مصغّر خاص به.
+      # ------------------------------------------------------------------
+      - name: Prepare isolated mobile build staging
+        run: |
+          set -e
+          rm -rf mobile_build_stage
+          mkdir -p mobile_build_stage
+
+          # انسخ ملف واجهة Flet الرئيسي
+          cp "${FLET_ENTRY_FILE}" mobile_build_stage/
+
+          # انسخ فقط الملفات المساعدة التي تستوردها الواجهة فعلياً
+          [ -f client_api.py ] && cp client_api.py mobile_build_stage/ || true
+
+          # انسخ مجلدات الأصول إن وجدت (صور/خطوط/أيقونات)
+          [ -d assets ] && cp -r assets mobile_build_stage/ || true
+
+          # pyproject.toml مصغّر: أضف هنا فقط الحزم التي يستوردها كود
+          # الواجهة نفسه (وليس أي حزمة خادم). أضِف حزمة واحدة واختبر البناء
+          # قبل إضافة التالية، لأن بعضها (pandas الثقيل، reportlab) قد لا
+          # يملك بناءً جاهزاً لأندرويد.
+          cat > mobile_build_stage/pyproject.toml << 'EOF'
+          [project]
+          name = "oilfield-app"
+          version = "1.0.0"
+          description = "OilField Automation Mobile Client"
+          dependencies = [
+            "flet",
+            "requests"
+          ]
+          EOF
+
+          echo "محتوى بيئة البناء المعزولة:"
+          find mobile_build_stage -maxdepth 2
+
+      # ------------------------------------------------------------------
+      # 4) البناء الفعلي داخل البيئة المعزولة فقط
+      #    --yes يمنع أي طلب موافقة تفاعلي يعلّق التنفيذ
       # ------------------------------------------------------------------
       - name: Build APK with Flet
-        run: |
-          flet build apk --yes --verbose
+        working-directory: mobile_build_stage
+        run: flet build apk --yes --verbose
         env:
           FLET_CLI_NO_RICH_OUTPUT: "1"
           PYTHONUTF8: "1"
 
       # ------------------------------------------------------------------
-      # 5) تحديد موقع ملف الـ APK فعليًا بدل افتراض اسم/مسار ثابت،
-      #    لأن Flet لا يضمن دائمًا app-release.apk في نفس المكان.
+      # 5) تحديد موقع ملف الـ APK فعلياً — Flet لا يضمن دائماً نفس المسار
       # ------------------------------------------------------------------
       - name: Locate and collect APK(s)
         run: |
           set -e
           mkdir -p artifact-output
-          mapfile -t APKS < <(find build -type f -name "*.apk" 2>/dev/null)
+          mapfile -t APKS < <(find mobile_build_stage -type f -name "*.apk" 2>/dev/null)
 
           if [ "${#APKS[@]}" -eq 0 ]; then
-            echo "::error::لم يتم العثور على أي ملف APK ضمن مجلد build/."
-            echo "محتوى مجلد build (لأغراض التشخيص):"
-            find build -maxdepth 4 2>/dev/null || echo "مجلد build غير موجود إطلاقًا"
+            echo "::error::لم يتم العثور على أي ملف APK."
+            echo "محتوى مجلد البناء (لأغراض التشخيص):"
+            find mobile_build_stage/build -maxdepth 5 2>/dev/null || echo "مجلد build غير موجود"
             exit 1
           fi
 
           echo "تم العثور على ${#APKS[@]} ملف/ملفات APK:"
           printf '%s\n' "${APKS[@]}"
-
-          for f in "${APKS[@]}"; do
-            cp "$f" artifact-output/
-          done
+          for f in "${APKS[@]}"; do cp "$f" artifact-output/; done
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
