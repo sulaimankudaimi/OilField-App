@@ -1,507 +1,200 @@
-# -*- coding: utf-8 -*-
-import flet as ft
-from datetime import date
+import difflib
 
-import client_api as api
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+
+from database import get_db, engine, Base
+from models import TripRecord, ExternalTripRecord, Vehicle, Driver, Well
+from schemas import (
+    TripCreate,
+    ExternalTripCreate,
+    VehicleInfoResponse,
+    VehicleUpsert,
+    DriverCreate,
+    WellCreate,
+)
+
+# إنشاء الجداول تلقائياً عند إقلاع الخادم إن لم تكن موجودة
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="OilField Field Reports API")
+
+# مطلوب حتى يستطيع تطبيق الجوال (Flet) الاتصال بالخادم من نطاق مختلف
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-def main(page: ft.Page):
-    page.title = "نظام أتمتة تقارير حقل العمر"
-    page.rtl = True
-    page.padding = 20
-    page.scroll = ft.ScrollMode.AUTO
-    page.theme_mode = ft.ThemeMode.LIGHT
+# =========================================================
+#  السيارات والسائقين — تكافئ منطق database.py في نسخة Streamlit
+# =========================================================
+@app.get("/api/vehicle/{plate_number}", response_model=VehicleInfoResponse)
+def get_vehicle_info(plate_number: str, db: Session = Depends(get_db)):
+    plate_number = plate_number.strip()
+    vehicle = db.query(Vehicle).filter(Vehicle.plate_number == plate_number).first()
 
-    # قوائم الرحلات المُضافة لليوم الحالي (تعادل st.session_state في Streamlit)
-    internal_entries = []
-    external_entries = []
-
-    # ---------------- تاريخ التقرير ----------------
-    report_date_picker = ft.DatePicker(value=date.today())
-    page.overlay.append(report_date_picker)
-    report_date_text = ft.Text(f"📅 تاريخ التقرير: {date.today().strftime('%Y-%m-%d')}", size=16)
-
-    def open_date_picker(e):
-        report_date_picker.open = True
-        page.update()
-
-    def on_date_change(e):
-        if report_date_picker.value:
-            report_date_text.value = f"📅 تاريخ التقرير: {report_date_picker.value.strftime('%Y-%m-%d')}"
-            page.update()
-
-    report_date_picker.on_change = on_date_change
-    change_date_button = ft.TextButton("تغيير التاريخ", icon=ft.icons.CALENDAR_MONTH, on_click=open_date_picker)
-
-    # =========================================================
-    #  تبويب: نقل داخلي
-    # =========================================================
-    int_plate = ft.TextField(label="🔢 رقم اللوحة", text_align=ft.TextAlign.RIGHT)
-    int_vehicle_info = ft.Text()
-    int_driver_dropdown = ft.Dropdown(label="👤 السائق", visible=False)
-    int_new_driver_field = ft.TextField(label="اسم السائق الجديد", visible=False)
-    int_suggestion_banner = ft.Container(visible=False)
-    int_new_vehicle_panel = ft.Container(visible=False)
-    int_new_type = ft.TextField(label="نوع السيارة", hint_text="مثال: مرسيدس")
-    int_new_color = ft.TextField(label="اللون", hint_text="مثال: أحمر")
-    int_new_driver_fresh = ft.TextField(label="اسم السائق")
-
-    int_well_dropdown = ft.Dropdown(label="🛢️ البئر المصدر")
-    int_new_well_field = ft.TextField(label="اسم البئر الجديد", visible=False)
-    int_qty = ft.TextField(label="🧪 الكمية (برميل)", keyboard_type=ft.KeyboardType.NUMBER)
-    int_status = ft.Text()
-
-    # يخزن آخر بيانات سيارة مؤكدة لهذه الرحلة (تعادل متغيرات smart_vehicle_lookup المُعادة في Streamlit)
-    int_current_vehicle = {"plate": None, "car_type": None, "color": None}
-
-    def refresh_wells():
-        try:
-            wells = api.get_wells()
-        except Exception:
-            wells = []
-        int_well_dropdown.options = [ft.dropdown.Option(w) for w in wells] + [
-            ft.dropdown.Option("➕ بئر جديد")
-        ]
-        int_well_dropdown.value = wells[0] if wells else "➕ بئر جديد"
-        page.update()
-
-    def on_int_well_change(e):
-        int_new_well_field.visible = int_well_dropdown.value == "➕ بئر جديد"
-        page.update()
-
-    int_well_dropdown.on_change = on_int_well_change
-
-    def use_int_suggestion(suggested_plate):
-        int_plate.value = suggested_plate
-        do_int_vehicle_lookup()
-
-    def on_int_driver_change(e):
-        int_new_driver_field.visible = int_driver_dropdown.value == "➕ سائق جديد لهذه السيارة"
-        page.update()
-
-    int_driver_dropdown.on_change = on_int_driver_change
-
-    def do_int_vehicle_lookup(e=None):
-        plate = int_plate.value.strip() if int_plate.value else ""
-        int_suggestion_banner.visible = False
-        int_new_vehicle_panel.visible = False
-        int_driver_dropdown.visible = False
-        int_new_driver_field.visible = False
-        int_vehicle_info.value = ""
-        int_current_vehicle.update(plate=None, car_type=None, color=None)
-
-        if not plate:
-            page.update()
-            return
-
-        try:
-            info = api.lookup_vehicle(plate)
-        except Exception as ex:
-            int_status.value = f"تعذر الاتصال بالخادم: {ex}"
-            int_status.color = ft.colors.RED
-            page.update()
-            return
-
-        if info.get("found"):
-            int_current_vehicle["plate"] = info["plate_number"]
-            int_current_vehicle["car_type"] = info.get("car_type")
-            int_current_vehicle["color"] = info.get("color")
-            int_vehicle_info.value = f"🚗 {info.get('car_type') or '—'} / {info.get('color') or '—'}"
-            drivers = info.get("drivers", [])
-            int_driver_dropdown.options = [ft.dropdown.Option(d) for d in drivers] + [
-                ft.dropdown.Option("➕ سائق جديد لهذه السيارة")
-            ]
-            int_driver_dropdown.value = drivers[0] if drivers else "➕ سائق جديد لهذه السيارة"
-            int_driver_dropdown.visible = True
-            int_new_driver_field.visible = int_driver_dropdown.value == "➕ سائق جديد لهذه السيارة"
-        else:
-            if info.get("suggestion"):
-                sugg = info["suggestion"]
-                int_suggestion_banner.content = ft.Row(
-                    [
-                        ft.Text(f"⚠️ لا توجد لوحة بهذا الرقم. هل تقصد {sugg}؟"),
-                        ft.ElevatedButton("✅ نعم، استخدم هذا الرقم", on_click=lambda e, p=sugg: use_int_suggestion(p)),
-                    ]
-                )
-                int_suggestion_banner.visible = True
-            int_new_vehicle_panel.visible = True
-
-        page.update()
-
-    int_plate.on_blur = do_int_vehicle_lookup
-
-    def register_new_int_vehicle(e):
-        plate = int_plate.value.strip() if int_plate.value else ""
-        driver = int_new_driver_fresh.value.strip() if int_new_driver_fresh.value else ""
-        if not plate or not driver:
-            int_status.value = "أدخل رقم اللوحة واسم السائق على الأقل."
-            int_status.color = ft.colors.RED
-            page.update()
-            return
-        try:
-            api.register_vehicle(plate, int_new_type.value or None, int_new_color.value or None)
-            api.create_driver(driver, plate)
-            int_status.value = "تم تسجيل السيارة. أعد إدخال رقم اللوحة أعلاه لإكمال الرحلة."
-            int_status.color = ft.colors.GREEN
-            int_new_type.value = int_new_color.value = int_new_driver_fresh.value = ""
-        except Exception as ex:
-            int_status.value = f"خطأ: {ex}"
-            int_status.color = ft.colors.RED
-        page.update()
-
-    int_new_vehicle_panel.content = ft.Column(
-        [
-            ft.Text("🆕 سيارة جديدة — لم يُعثر عليها، سجّلها الآن لمرة واحدة", weight=ft.FontWeight.BOLD),
-            int_new_type,
-            int_new_color,
-            int_new_driver_fresh,
-            ft.ElevatedButton("💾 تسجيل السيارة والمتابعة", on_click=register_new_int_vehicle),
-        ],
-        spacing=10,
-    )
-
-    def add_internal_entry(e):
-        plate = int_current_vehicle["plate"]
-        driver = None
-        if int_driver_dropdown.visible:
-            driver = (
-                int_new_driver_field.value.strip()
-                if int_driver_dropdown.value == "➕ سائق جديد لهذه السيارة"
-                else int_driver_dropdown.value
-            )
-        well = (
-            int_new_well_field.value.strip()
-            if int_well_dropdown.value == "➕ بئر جديد"
-            else int_well_dropdown.value
+    if vehicle:
+        return VehicleInfoResponse(
+            found=True,
+            plate_number=vehicle.plate_number,
+            car_type=vehicle.car_type,
+            color=vehicle.color,
+            drivers=[d.name for d in vehicle.drivers],
         )
-        try:
-            qty = float(int_qty.value) if int_qty.value else 0.0
-        except ValueError:
-            qty = 0.0
 
-        if not plate or not driver or not well:
-            int_status.value = "الرجاء إكمال جميع البيانات الأساسية."
-            int_status.color = ft.colors.RED
-            page.update()
-            return
+    # لم تُوجد اللوحة تماماً — نبحث عن أقرب رقم مشابه لاقتراحه على المستخدم
+    all_plates = [v.plate_number for v in db.query(Vehicle.plate_number).all()]
+    close = difflib.get_close_matches(plate_number, all_plates, n=1, cutoff=0.6)
+    suggestion = close[0] if close else None
 
-        internal_entries.append(
-            {
-                "رقم اللوحة": plate,
-                "النوع": int_current_vehicle.get("car_type"),
-                "اللون": int_current_vehicle.get("color"),
-                "السائق": driver,
-                "البئر": well,
-                "الكمية (برميل)": qty,
-            }
-        )
-        int_status.value = "تمت الإضافة إلى قائمة اليوم ✅"
-        int_status.color = ft.colors.GREEN
-        int_plate.value = ""
-        int_qty.value = ""
-        int_vehicle_info.value = ""
-        int_driver_dropdown.visible = False
-        refresh_review()
-        page.update()
+    return VehicleInfoResponse(found=False, suggestion=suggestion)
 
-    internal_tab = ft.Column(
-        [
-            ft.Text("إضافة رحلة نقل داخلي (من بئر إلى المحطة الرئيسية)", size=18, weight=ft.FontWeight.BOLD),
-            int_plate,
-            int_vehicle_info,
-            int_suggestion_banner,
-            int_driver_dropdown,
-            int_new_driver_field,
-            int_new_vehicle_panel,
-            int_well_dropdown,
-            int_new_well_field,
-            int_qty,
-            ft.ElevatedButton("➕ إضافة للقائمة", icon=ft.icons.ADD, on_click=add_internal_entry),
-            int_status,
-        ],
-        spacing=12,
-    )
 
-    # =========================================================
-    #  تبويب: نقل خارجي
-    # =========================================================
-    ext_plate = ft.TextField(label="🔢 رقم اللوحة", text_align=ft.TextAlign.RIGHT)
-    ext_vehicle_info = ft.Text()
-    ext_driver_dropdown = ft.Dropdown(label="👤 السائق", visible=False)
-    ext_new_driver_field = ft.TextField(label="اسم السائق الجديد", visible=False)
-    ext_suggestion_banner = ft.Container(visible=False)
-    ext_new_vehicle_panel = ft.Container(visible=False)
-    ext_new_type = ft.TextField(label="نوع السيارة")
-    ext_new_color = ft.TextField(label="اللون")
-    ext_new_driver_fresh = ft.TextField(label="اسم السائق")
-
-    ext_task = ft.TextField(label="🔖 رقم المهمة")
-    ext_loc = ft.TextField(label="📍 موقع التحميل", value="المحطة الرئيسية")
-    ext_wb = ft.TextField(label="⚖️ الوزن قبل", keyboard_type=ft.KeyboardType.NUMBER)
-    ext_wa = ft.TextField(label="⚖️ الوزن بعد", keyboard_type=ft.KeyboardType.NUMBER)
-    ext_qty = ft.TextField(label="🧪 الكمية (برميل)", keyboard_type=ft.KeyboardType.NUMBER)
-    ext_status = ft.Text()
-
-    ext_current_vehicle = {"plate": None}
-
-    def use_ext_suggestion(suggested_plate):
-        ext_plate.value = suggested_plate
-        do_ext_vehicle_lookup()
-
-    def on_ext_driver_change(e):
-        ext_new_driver_field.visible = ext_driver_dropdown.value == "➕ سائق جديد لهذه السيارة"
-        page.update()
-
-    ext_driver_dropdown.on_change = on_ext_driver_change
-
-    def do_ext_vehicle_lookup(e=None):
-        plate = ext_plate.value.strip() if ext_plate.value else ""
-        ext_suggestion_banner.visible = False
-        ext_new_vehicle_panel.visible = False
-        ext_driver_dropdown.visible = False
-        ext_new_driver_field.visible = False
-        ext_vehicle_info.value = ""
-        ext_current_vehicle["plate"] = None
-
-        if not plate:
-            page.update()
-            return
-
-        try:
-            info = api.lookup_vehicle(plate)
-        except Exception as ex:
-            ext_status.value = f"تعذر الاتصال بالخادم: {ex}"
-            ext_status.color = ft.colors.RED
-            page.update()
-            return
-
-        if info.get("found"):
-            ext_current_vehicle["plate"] = info["plate_number"]
-            ext_vehicle_info.value = f"🚗 {info.get('car_type') or '—'} / {info.get('color') or '—'}"
-            drivers = info.get("drivers", [])
-            ext_driver_dropdown.options = [ft.dropdown.Option(d) for d in drivers] + [
-                ft.dropdown.Option("➕ سائق جديد لهذه السيارة")
-            ]
-            ext_driver_dropdown.value = drivers[0] if drivers else "➕ سائق جديد لهذه السيارة"
-            ext_driver_dropdown.visible = True
-            ext_new_driver_field.visible = ext_driver_dropdown.value == "➕ سائق جديد لهذه السيارة"
+@app.post("/api/vehicle")
+def upsert_vehicle(payload: VehicleUpsert, db: Session = Depends(get_db)):
+    try:
+        vehicle = db.query(Vehicle).filter(Vehicle.plate_number == payload.plate_number).first()
+        if vehicle:
+            if payload.car_type:
+                vehicle.car_type = payload.car_type
+            if payload.color:
+                vehicle.color = payload.color
         else:
-            if info.get("suggestion"):
-                sugg = info["suggestion"]
-                ext_suggestion_banner.content = ft.Row(
-                    [
-                        ft.Text(f"⚠️ لا توجد لوحة بهذا الرقم. هل تقصد {sugg}؟"),
-                        ft.ElevatedButton("✅ نعم، استخدم هذا الرقم", on_click=lambda e, p=sugg: use_ext_suggestion(p)),
-                    ]
-                )
-                ext_suggestion_banner.visible = True
-            ext_new_vehicle_panel.visible = True
-
-        page.update()
-
-    ext_plate.on_blur = do_ext_vehicle_lookup
-
-    def register_new_ext_vehicle(e):
-        plate = ext_plate.value.strip() if ext_plate.value else ""
-        driver = ext_new_driver_fresh.value.strip() if ext_new_driver_fresh.value else ""
-        if not plate or not driver:
-            ext_status.value = "أدخل رقم اللوحة واسم السائق على الأقل."
-            ext_status.color = ft.colors.RED
-            page.update()
-            return
-        try:
-            api.register_vehicle(plate, ext_new_type.value or None, ext_new_color.value or None)
-            api.create_driver(driver, plate)
-            ext_status.value = "تم تسجيل السيارة. أعد إدخال رقم اللوحة أعلاه لإكمال الرحلة."
-            ext_status.color = ft.colors.GREEN
-            ext_new_type.value = ext_new_color.value = ext_new_driver_fresh.value = ""
-        except Exception as ex:
-            ext_status.value = f"خطأ: {ex}"
-            ext_status.color = ft.colors.RED
-        page.update()
-
-    ext_new_vehicle_panel.content = ft.Column(
-        [
-            ft.Text("🆕 سيارة جديدة — لم يُعثر عليها، سجّلها الآن لمرة واحدة", weight=ft.FontWeight.BOLD),
-            ext_new_type,
-            ext_new_color,
-            ext_new_driver_fresh,
-            ft.ElevatedButton("💾 تسجيل السيارة والمتابعة", on_click=register_new_ext_vehicle),
-        ],
-        spacing=10,
-    )
-
-    def add_external_entry(e):
-        plate = ext_current_vehicle["plate"]
-        driver = None
-        if ext_driver_dropdown.visible:
-            driver = (
-                ext_new_driver_field.value.strip()
-                if ext_driver_dropdown.value == "➕ سائق جديد لهذه السيارة"
-                else ext_driver_dropdown.value
+            vehicle = Vehicle(
+                plate_number=payload.plate_number,
+                car_type=payload.car_type,
+                color=payload.color,
             )
+            db.add(vehicle)
+        db.commit()
+        return {"message": "تم حفظ بيانات السيارة", "plate_number": vehicle.plate_number}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
-        try:
-            wb = float(ext_wb.value) if ext_wb.value else 0.0
-            wa = float(ext_wa.value) if ext_wa.value else 0.0
-        except ValueError:
-            ext_status.value = "الرجاء إدخال أوزان صحيحة."
-            ext_status.color = ft.colors.RED
-            page.update()
-            return
 
-        if wa <= wb:
-            ext_status.value = "الوزن بعد يجب أن يكون أكبر من الوزن قبل."
-            ext_status.color = ft.colors.RED
-            page.update()
-            return
+@app.post("/api/driver")
+def get_or_create_driver(payload: DriverCreate, db: Session = Depends(get_db)):
+    try:
+        driver = db.query(Driver).filter(Driver.name == payload.name).first()
+        if not driver:
+            driver = Driver(name=payload.name)
+            db.add(driver)
+            db.commit()
+            db.refresh(driver)
 
-        net_weight = wa - wb
-        qty = float(ext_qty.value) if ext_qty.value else None
+        if payload.plate_number:
+            vehicle = db.query(Vehicle).filter(Vehicle.plate_number == payload.plate_number).first()
+            if not vehicle:
+                raise HTTPException(status_code=404, detail="السيارة غير موجودة، سجّلها أولاً")
+            if driver not in vehicle.drivers:
+                vehicle.drivers.append(driver)
+                db.commit()
 
-        external_entries.append(
-            {
-                "رقم اللوحة": plate,
-                "السائق": driver,
-                "رقم المهمة": ext_task.value,
-                "موقع التحميل": ext_loc.value,
-                "الوزن قبل": wb,
-                "الوزن بعد": wa,
-                "الوزن الصافي": net_weight,
-                "الكمية (برميل)": qty,
-            }
+        return {"message": "تم حفظ السائق", "driver_id": driver.id, "name": driver.name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================================================
+#  الآبار
+# =========================================================
+@app.get("/api/wells")
+def get_all_wells(db: Session = Depends(get_db)):
+    wells = db.query(Well).order_by(Well.name).all()
+    return [w.name for w in wells]
+
+
+@app.post("/api/wells")
+def create_well(payload: WellCreate, db: Session = Depends(get_db)):
+    try:
+        existing = db.query(Well).filter(Well.name == payload.name).first()
+        if existing:
+            return {"message": "البئر موجود مسبقاً", "well_id": existing.id}
+        well = Well(name=payload.name)
+        db.add(well)
+        db.commit()
+        db.refresh(well)
+        return {"message": "تم إضافة البئر", "well_id": well.id}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================================================
+#  الرحلات الداخلية
+# =========================================================
+@app.post("/api/internal_trip")
+def create_trip(trip: TripCreate, db: Session = Depends(get_db)):
+    try:
+        new_trip = TripRecord(
+            plate_number=trip.plate_number,
+            driver_name=trip.driver_name,
+            well_name=trip.well_name,
+            quantity_bbl=trip.quantity_bbl,
         )
-        ext_status.value = "تمت الإضافة إلى قائمة اليوم ✅"
-        ext_status.color = ft.colors.GREEN
-        ext_plate.value = ext_task.value = ""
-        ext_wb.value = ext_wa.value = ext_qty.value = ""
-        ext_vehicle_info.value = ""
-        ext_driver_dropdown.visible = False
-        refresh_review()
-        page.update()
-
-    external_tab = ft.Column(
-        [
-            ft.Text("إضافة رحلة نقل خارجي (من المحطة الرئيسية إلى المصفاة)", size=18, weight=ft.FontWeight.BOLD),
-            ext_plate,
-            ext_vehicle_info,
-            ext_suggestion_banner,
-            ext_driver_dropdown,
-            ext_new_driver_field,
-            ext_new_vehicle_panel,
-            ext_task,
-            ext_loc,
-            ext_wb,
-            ext_wa,
-            ext_qty,
-            ft.ElevatedButton("➕ إضافة للقائمة", icon=ft.icons.ADD, on_click=add_external_entry),
-            ext_status,
-        ],
-        spacing=12,
-    )
-
-    # =========================================================
-    #  تبويب: مراجعة وحفظ اليوم
-    # =========================================================
-    internal_review_list = ft.Column()
-    external_review_list = ft.Column()
-    review_status = ft.Text()
-
-    def refresh_review():
-        internal_review_list.controls = [
-            ft.Text(f"🚛 {e['رقم اللوحة']} — {e['السائق']} — {e['البئر']} — {e['الكمية (برميل)']} برميل")
-            for e in internal_entries
-        ] or [ft.Text("لا توجد رحلات داخلية بعد.", italic=True)]
-
-        external_review_list.controls = [
-            ft.Text(
-                f"🚚 {e['رقم اللوحة']} — {e['السائق']} — مهمة {e['رقم المهمة'] or '—'} — "
-                f"صافي الوزن {e['الوزن الصافي']}"
-            )
-            for e in external_entries
-        ] or [ft.Text("لا توجد رحلات خارجية بعد.", italic=True)]
-
-        page.update()
-
-    def save_all_entries(e):
-        errors = []
-        for entry in list(internal_entries):
-            try:
-                api.create_trip(entry["رقم اللوحة"], entry["السائق"], entry["البئر"], entry["الكمية (برميل)"])
-                internal_entries.remove(entry)
-            except Exception as ex:
-                errors.append(str(ex))
-
-        for entry in list(external_entries):
-            try:
-                api.create_external_trip(
-                    entry["رقم اللوحة"],
-                    entry["السائق"],
-                    entry["رقم المهمة"],
-                    entry["موقع التحميل"],
-                    entry["الوزن قبل"],
-                    entry["الوزن بعد"],
-                    entry["الوزن الصافي"],
-                    entry["الكمية (برميل)"],
-                )
-                external_entries.remove(entry)
-            except Exception as ex:
-                errors.append(str(ex))
-
-        if errors:
-            review_status.value = "تم الحفظ مع بعض الأخطاء: " + " | ".join(errors)
-            review_status.color = ft.colors.RED
-        else:
-            review_status.value = "تم حفظ جميع رحلات اليوم بنجاح ✅"
-            review_status.color = ft.colors.GREEN
-
-        refresh_review()
-        page.update()
-
-    review_tab = ft.Column(
-        [
-            report_date_text,
-            change_date_button,
-            ft.Divider(),
-            ft.Text("🚛 رحلات النقل الداخلي", size=16, weight=ft.FontWeight.BOLD),
-            internal_review_list,
-            ft.Divider(),
-            ft.Text("🚚 رحلات النقل الخارجي", size=16, weight=ft.FontWeight.BOLD),
-            external_review_list,
-            ft.Divider(),
-            ft.ElevatedButton(
-                "💾 حفظ كل رحلات اليوم",
-                icon=ft.icons.SAVE,
-                on_click=save_all_entries,
-                bgcolor=ft.colors.GREEN,
-                color=ft.colors.WHITE,
-            ),
-            review_status,
-        ],
-        spacing=10,
-    )
-
-    # =========================================================
-    #  التبويبات الرئيسية
-    # =========================================================
-    tabs = ft.Tabs(
-        selected_index=0,
-        animation_duration=200,
-        tabs=[
-            ft.Tab(text="🚛 نقل داخلي", content=ft.Container(internal_tab, padding=15)),
-            ft.Tab(text="🚚 نقل خارجي", content=ft.Container(external_tab, padding=15)),
-            ft.Tab(text="📋 مراجعة وحفظ اليوم", content=ft.Container(review_tab, padding=15)),
-        ],
-        expand=True,
-    )
-
-    page.add(
-        ft.Text("🛢️ نظام أتمتة تقارير حقل العمر", size=24, weight=ft.FontWeight.BOLD),
-        tabs,
-    )
-
-    refresh_wells()
-    refresh_review()
+        db.add(new_trip)
+        db.commit()
+        db.refresh(new_trip)
+        return {"message": "تم حفظ السجل بنجاح", "trip_id": new_trip.id}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-ft.app(target=main)
+# =========================================================
+#  الرحلات الخارجية
+# =========================================================
+@app.post("/api/external_trip")
+def create_external_trip(trip: ExternalTripCreate, db: Session = Depends(get_db)):
+    try:
+        new_trip = ExternalTripRecord(
+            plate_number=trip.plate_number,
+            driver_name=trip.driver_name,
+            task_number=trip.task_number,
+            loading_location=trip.loading_location,
+            weight_before=trip.weight_before,
+            weight_after=trip.weight_after,
+            net_weight=trip.net_weight,
+            quantity_bbl=trip.quantity_bbl,
+        )
+        db.add(new_trip)
+        db.commit()
+        db.refresh(new_trip)
+        return {"message": "تم حفظ السجل بنجاح", "trip_id": new_trip.id}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================================================
+#  مؤشرات الأداء
+# =========================================================
+@app.get("/api/kpi")
+def get_kpis(db: Session = Depends(get_db)):
+    try:
+        total_trips = db.query(TripRecord).count()
+        trips = db.query(TripRecord).all()
+        total_barrels = sum(t.quantity_bbl for t in trips)
+        return {
+            "total_internal_trips": total_trips,
+            "total_barrels_internal": total_barrels,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# لتشغيل الخادم من سطر الأوامر أثناء التطوير المحلي فقط
+# على Render يتم التشغيل عبر Start Command: uvicorn main:app --host 0.0.0.0 --port $PORT
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
