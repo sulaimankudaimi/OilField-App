@@ -15,23 +15,49 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ------------------------------------------------------------------
+      # 1) تحرير مساحة القرص — بناء Flutter/Android يستهلك مساحة كبيرة
+      #    وقد يفشل البناء بسبب امتلاء القرص على الـ runner الافتراضي
+      # ------------------------------------------------------------------
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: false        # لا تحذف أدوات Android، نحتاجها للبناء
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      # ------------------------------------------------------------------
+      # 2) جافا (JDK 17) — Gradle لا يعمل بدونها إطلاقاً عند بناء أندرويد
+      # ------------------------------------------------------------------
+      - name: Set up Java (JDK 17)
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       # ------------------------------------------------------------------
-      # لا حاجة لأي نسخ انتقائي (whitelist copying) بعد الآن:
-      # Flet يبني مباشرة من مجلد frontend الذي لا يحتوي إطلاقاً
-      # على fastapi أو أي كود خادم، فالعزل أصبح على مستوى نظام الملفات.
+      # 3) تثبيت أداة Flet CLI فقط على الـ runner
+      #    ملاحظة: لا نُثبّت frontend/requirements.txt هنا عمداً؛
+      #    Flet يقرأ هذا الملف بنفسه ويحزّم اعتمادياته داخل تطبيق
+      #    أندرويد النهائي، وتثبيتها يدوياً على الـ runner هو ما تسبب
+      #    سابقاً بتعارضات أثناء التحزيم.
       # ------------------------------------------------------------------
       - name: Install Flet CLI
         run: pip install flet
 
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: pip install -r requirements.txt
-
+      # ------------------------------------------------------------------
+      # 4) البناء الفعلي داخل مجلد frontend المعزول تماماً عن الخادم
+      #    --yes يمنع أي طلب موافقة تفاعلي يعلّق التنفيذ
+      # ------------------------------------------------------------------
       - name: Build APK with Flet
         working-directory: frontend
         run: flet build apk --yes --verbose
@@ -40,7 +66,7 @@ jobs:
           PYTHONUTF8: "1"
 
       # ------------------------------------------------------------------
-      # تحديد موقع ملف الـ APK فعلياً — Flet لا يضمن دائماً نفس المسار
+      # 5) تحديد موقع ملف الـ APK فعلياً — Flet لا يضمن دائماً نفس المسار
       # ------------------------------------------------------------------
       - name: Locate and collect APK(s)
         run: |
