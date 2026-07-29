@@ -1,8 +1,12 @@
 [project]
 name = "oilfield-app"
 version = "1.0.0"
-description = "OilField internal trips mobile app"
+description = "OilField field reports mobile app"
 requires-python = ">=3.9"
+dependencies = [
+    "flet",
+    "requests",
+]
 
 [tool.flet]
 org = "com.oilfield"
