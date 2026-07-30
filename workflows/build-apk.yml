@@ -10,25 +10,25 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # ------------------------------------------------------------------
-      # 1) تحرير مساحة القرص — بناء Flutter/Android يستهلك مساحة كبيرة
-      #    وقد يفشل البناء بسبب امتلاء القرص على الـ runner الافتراضي
+      # 1) تحرير مساحة القرص — استبدلنا jlumbroso/free-disk-space@main
+      #    (إصدار غير مثبَّت + قد يفشل بسرعة كما حدث في تشغيلاتك الأخيرة،
+      #    والتي انتهت خلال ~40 ثانية فقط، بينما هذا الإجراء يستغرق عادة
+      #    4-5 دقائق عند نجاحه الفعلي — دليل قوي على فشله المبكر)
+      #    بأمر bash بسيط ومضمون السلوك (مُختبَر سابقاً ووصل لبناء ناجح).
       # ------------------------------------------------------------------
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: false        # لا تحذف أدوات Android، نحتاجها للبناء
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk-bundle \
+                      /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h
 
       # ------------------------------------------------------------------
       # 2) جافا (JDK 17) — Gradle لا يعمل بدونها إطلاقاً عند بناء أندرويد
@@ -40,19 +40,23 @@ jobs:
           java-version: "17"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: frontend/pyproject.toml
 
       # ------------------------------------------------------------------
       # 3) تثبيت أداة Flet CLI فقط على الـ runner
       #    ملاحظة: لا نُثبّت frontend/requirements.txt هنا عمداً؛
       #    Flet يقرأ هذا الملف بنفسه ويحزّم اعتمادياته داخل تطبيق
-      #    أندرويد النهائي، وتثبيتها يدوياً على الـ runner هو ما تسبب
-      #    سابقاً بتعارضات أثناء التحزيم.
+      #    أندرويد النهائي.
       # ------------------------------------------------------------------
       - name: Install Flet CLI
-        run: pip install flet
+        run: |
+          pip install --upgrade pip
+          pip install "flet[all]"
+          flet --version
 
       # ------------------------------------------------------------------
       # 4) البناء الفعلي داخل مجلد frontend المعزول تماماً عن الخادم
@@ -86,7 +90,7 @@ jobs:
           for f in "${APKS[@]}"; do cp "$f" artifact-output/; done
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: oilfield-app-apk
           path: artifact-output/*.apk
